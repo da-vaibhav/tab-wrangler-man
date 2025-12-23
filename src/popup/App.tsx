@@ -1,10 +1,18 @@
 import { useEffect, useState } from 'react'
 import './App.css'
 
+interface DuplicateGroup {
+  url: string;
+  tabs: chrome.tabs.Tab[];
+  count: number;
+}
+
 export default function App() {
   const [tabs, setTabs] = useState<chrome.tabs.Tab[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedTab, setSelectedTab] = useState<chrome.tabs.Tab | null>(null)
+  const [duplicateGroups, setDuplicateGroups] = useState<DuplicateGroup[]>([])
+  const [viewMode, setViewMode] = useState<'all' | 'window' | 'active' | 'duplicates'>('all')
 
   useEffect(() => {
     getAllTabs()
@@ -15,6 +23,7 @@ export default function App() {
       setLoading(true)
       const allTabs = await chrome.tabs.query({})
       setTabs(allTabs)
+      setViewMode('all')
       console.log('All tabs:', allTabs)
     } catch (error) {
       console.error('Error getting tabs:', error)
@@ -27,6 +36,7 @@ export default function App() {
     try {
       const currentWindowTabs = await chrome.tabs.query({ currentWindow: true })
       setTabs(currentWindowTabs)
+      setViewMode('window')
       console.log('Current window tabs:', currentWindowTabs)
     } catch (error) {
       console.error('Error getting tabs:', error)
@@ -38,6 +48,7 @@ export default function App() {
       const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true })
       if (activeTab) {
         setTabs([activeTab])
+        setViewMode('active')
         console.log('Active tab:', activeTab)
       }
     } catch (error) {
@@ -45,9 +56,58 @@ export default function App() {
     }
   }
 
+  const getDuplicateTabs = async () => {
+    try {
+      setLoading(true)
+      const allTabs = await chrome.tabs.query({})
+
+      // Group by URL
+      const urlMap = new Map<string, chrome.tabs.Tab[]>()
+      allTabs.forEach(tab => {
+        if (tab.url) {
+          const existing = urlMap.get(tab.url) || []
+          urlMap.set(tab.url, [...existing, tab])
+        }
+      })
+
+      // Filter to only groups with 2+ tabs
+      const duplicates = Array.from(urlMap.values())
+        .filter(group => group.length >= 2)
+        .map(tabs => ({
+          url: tabs[0].url || '',
+          tabs: tabs.sort((a, b) => (a.id || 0) - (b.id || 0)),
+          count: tabs.length
+        }))
+
+      // Sort by count (descending) then URL
+      duplicates.sort((a, b) => b.count - a.count || a.url.localeCompare(b.url))
+
+      setDuplicateGroups(duplicates)
+      setTabs(duplicates.flatMap(g => g.tabs))
+      setViewMode('duplicates')
+      console.log('Duplicate groups:', duplicates)
+    } catch (error) {
+      console.error('Error getting duplicates:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const handleTabClick = (tab: chrome.tabs.Tab) => {
     setSelectedTab(tab)
     console.log('Selected tab full info:', tab)
+  }
+
+  const focusTab = async (tabId: number | undefined, windowId: number | undefined) => {
+    if (!tabId || !windowId) return
+
+    try {
+      await chrome.tabs.update(tabId, { active: true })
+      await chrome.windows.update(windowId, { focused: true })
+      console.log('Focused tab:', tabId)
+    } catch (error) {
+      console.error('Error focusing tab:', error)
+    }
   }
 
   const unloadTab = async (tabId: number | undefined) => {
@@ -106,6 +166,15 @@ export default function App() {
           cursor: 'pointer',
           fontSize: '0.9em'
         }}>Active Tab</button>
+        <button type="button" onClick={getDuplicateTabs} style={{
+          padding: '6px 12px',
+          backgroundColor: '#007bff',
+          color: '#ffffff',
+          border: 'none',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          fontSize: '0.9em'
+        }}>Duplicates Only</button>
       </div>
 
       {!selectedTab ? (
@@ -113,54 +182,146 @@ export default function App() {
           <div style={{ margin: '10px 0', fontSize: '0.9em', color: '#1a1a1a', backgroundColor: '#f0f8ff', padding: '8px', borderRadius: '4px', border: '1px solid #b0d4f1' }}>
             <div style={{ fontWeight: 'bold' }}>Total Tabs: {tabs.length}</div>
           </div>
+          {viewMode === 'duplicates' && (
+            <div style={{ margin: '10px 0', fontSize: '0.9em', color: '#1a1a1a', backgroundColor: '#fff3cd', padding: '8px', borderRadius: '4px', border: '1px solid #ffc107' }}>
+              <div style={{ fontWeight: 'bold' }}>Duplicate Groups: {duplicateGroups.length}</div>
+              <div style={{ fontSize: '0.85em' }}>Total duplicate tabs: {tabs.length}</div>
+            </div>
+          )}
           <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-            {tabs.map((tab, index) => (
-              <div
-                key={tab.id || index}
-                onClick={() => handleTabClick(tab)}
-                style={{
-                  padding: '8px',
-                  borderBottom: '1px solid #d0d0d0',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  cursor: 'pointer',
-                  backgroundColor: 'transparent'
-                }}
-                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#e8f4fd'}
-                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-              >
-                {tab.favIconUrl && (
-                  <img
-                    src={tab.favIconUrl}
-                    alt=""
-                    style={{ width: '16px', height: '16px', flexShrink: 0 }}
-                  />
-                )}
-                <div style={{ flex: 1, overflow: 'hidden' }}>
-                  <div style={{
-                    fontWeight: tab.active ? 'bold' : 'normal',
-                    whiteSpace: 'nowrap',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    fontSize: '0.9em',
-                    color: tab.discarded ? '#888888' : '#1a1a1a',
-                    fontStyle: tab.discarded ? 'italic' : 'normal'
-                  }}>
-                    {tab.title || 'No title'} {tab.discarded && '(Unloaded)'}
+            {viewMode === 'duplicates' ? (
+              duplicateGroups.length === 0 ? (
+                <div style={{ padding: '20px', textAlign: 'center', color: '#666' }}>
+                  No duplicate tabs found
+                </div>
+              ) : (
+                duplicateGroups.map((group) => (
+                  <div key={group.url} style={{ marginBottom: '12px' }}>
+                    {/* Group header */}
+                    <div style={{
+                      padding: '8px',
+                      backgroundColor: '#f0f8ff',
+                      borderLeft: '3px solid #007bff',
+                      fontSize: '0.85em',
+                      fontWeight: 'bold',
+                      color: '#1a1a1a',
+                      borderRadius: '2px',
+                      wordBreak: 'break-all'
+                    }}>
+                      {group.url} ({group.count} duplicates)
+                    </div>
+
+                    {/* Tabs in group */}
+                    {group.tabs.map((tab, index) => (
+                      <div
+                        key={tab.id || index}
+                        onClick={() => handleTabClick(tab)}
+                        style={{
+                          padding: '8px 12px',
+                          paddingLeft: '20px',
+                          borderBottom: '1px solid #e0e0e0',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          cursor: 'pointer',
+                          backgroundColor: 'transparent',
+                          marginLeft: '8px',
+                          borderRadius: '2px'
+                        }}
+                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#e8f4fd'}
+                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                      >
+                        {tab.favIconUrl && (
+                          <img
+                            src={tab.favIconUrl}
+                            alt=""
+                            style={{ width: '16px', height: '16px', flexShrink: 0 }}
+                          />
+                        )}
+                        <div style={{ flex: 1, overflow: 'hidden' }}>
+                          <div style={{
+                            fontWeight: tab.active ? 'bold' : 'normal',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            fontSize: '0.9em',
+                            color: '#1a1a1a'
+                          }}>
+                            #{tab.id} {tab.title || 'No title'}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            focusTab(tab.id, tab.windowId)
+                          }}
+                          style={{
+                            padding: '4px 8px',
+                            backgroundColor: '#28a745',
+                            color: '#ffffff',
+                            border: 'none',
+                            borderRadius: '3px',
+                            cursor: 'pointer',
+                            fontSize: '0.8em'
+                          }}
+                        >
+                          Focus
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                  <div style={{
-                    fontSize: '0.75em',
-                    color: tab.discarded ? '#999999' : '#5a5a5a',
-                    whiteSpace: 'nowrap',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis'
-                  }}>
-                    {tab.url}
+                ))
+              )
+            ) : (
+              tabs.map((tab, index) => (
+                <div
+                  key={tab.id || index}
+                  onClick={() => handleTabClick(tab)}
+                  style={{
+                    padding: '8px',
+                    borderBottom: '1px solid #d0d0d0',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    cursor: 'pointer',
+                    backgroundColor: 'transparent'
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#e8f4fd'}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                >
+                  {tab.favIconUrl && (
+                    <img
+                      src={tab.favIconUrl}
+                      alt=""
+                      style={{ width: '16px', height: '16px', flexShrink: 0 }}
+                    />
+                  )}
+                  <div style={{ flex: 1, overflow: 'hidden' }}>
+                    <div style={{
+                      fontWeight: tab.active ? 'bold' : 'normal',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      fontSize: '0.9em',
+                      color: tab.discarded ? '#888888' : '#1a1a1a',
+                      fontStyle: tab.discarded ? 'italic' : 'normal'
+                    }}>
+                      {tab.title || 'No title'} {tab.discarded && '(Unloaded)'}
+                    </div>
+                    <div style={{
+                      fontSize: '0.75em',
+                      color: tab.discarded ? '#999999' : '#5a5a5a',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis'
+                    }}>
+                      {tab.url}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
       ) : (
